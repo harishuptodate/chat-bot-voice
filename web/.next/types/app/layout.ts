@@ -1,4 +1,4 @@
-// File: /Users/debsouryadatta/Desktop/neel/Coding/Practice/chat-bot-voice/web/app/layout.tsx
+// File: C:\Users\Harish Chimmani\Desktop\voice-ai\web\app\layout.tsx
 import * as entry from '../../../app/layout.js'
 import type { ResolvingMetadata, ResolvingViewport } from 'next/dist/lib/metadata/types/metadata-interface.js'
 

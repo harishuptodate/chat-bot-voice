@@ -5,7 +5,6 @@ let socket: Socket | null = null;
 export function getSocket() {
 	if (!socket) {
 		const url = process.env.NEXT_PUBLIC_REALTIME_WS_URL || 'http://localhost:8080';
-		console.log('url', url);
 		socket = io(url, {
 			autoConnect: false,
 		});
