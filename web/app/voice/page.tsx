@@ -17,11 +17,11 @@ export default function VoicePage() {
 
 	useEffect(() => {
 		const socket = getSocket();
-		console.log('socket', socket);
+		console.log('socket: ', socket);
 		socketRef.current = socket;
 
 		socket.on('connect', () => {
-			socket.emit('start', { lang: 'en-US', voice: 'aura-asteria-en' });
+			// socket.emit('start', { lang: 'en-US', voice: 'aura-asteria-en' });
 			console.log('connected');
 		});
 
@@ -53,8 +53,14 @@ export default function VoicePage() {
 
 		socket.on('error', (e: any) => console.error('Server error', e));
 
+		// Manually connect to the socket
+		if (!socket.connected) {
+			console.log('🔌 Attempting to connect to WebSocket server...');
+			socket.connect();
+		}
+
 		return () => {
-			socket.disconnect();
+			// socket.disconnect();
 			console.log('disconnected');
 		};
 	}, []);

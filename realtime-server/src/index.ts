@@ -20,19 +20,27 @@ const app = express();
 app.use(cors({ origin: CORS_ORIGINS, credentials: true }));
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
+// Validate environment variables
+if (!DG_KEY) {
+	console.error('❌ FATAL: DEEPGRAM_API_KEY is not set in .env file');
+	process.exit(1);
+}
+
 const server = http.createServer(app);
 const io = new Server(server, {
 	cors: { origin: '*', credentials: true },
 	maxHttpBufferSize: 1e7, // ~10MB
 });
 const dg = createClient(DG_KEY);
-console.log(DG_KEY);
+console.log('✅ Deepgram client initialized');
 
 type DGStream = ReturnType<typeof dg.listen.live> extends Promise<infer P>
 	? P
 	: any;
 
 io.on('connection', (socket) => {
+	console.log("✅ WebSocket client connected:", socket.id);
+	
 	let dgLive: DGStream | null = null;
 	let ttsAbort: AbortController | null = null;
 
@@ -122,7 +130,7 @@ io.on('connection', (socket) => {
 				stopAnyTTS();
 				ttsAbort = new AbortController();
 
-				const url = `https://api.createClient.com/v1/speak?model=${encodeURIComponent(
+				const url = `https://api.deepgram.com/v1/speak?model=${encodeURIComponent(
 					voice || DG_TTS_VOICE,
 				)}`;
 				const res = await fetch(url, {
