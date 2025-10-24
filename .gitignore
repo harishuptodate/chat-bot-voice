@@ -1,2 +1,17 @@
 .env
 node_modules
+dist 
+build
+.next
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.development
+.env.test
+.env.production
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.DS_Store
