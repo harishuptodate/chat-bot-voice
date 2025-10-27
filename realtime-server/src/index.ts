@@ -13,6 +13,7 @@ const CORS_ORIGINS = (process.env.CORS_ORIGINS || 'http://localhost:3000')
 	.map((s) => s.trim());
 
 const DG_KEY = process.env.DEEPGRAM_API_KEY!;
+console.log('DG_KEY:', DG_KEY);
 const DG_ASR_MODEL = process.env.DG_ASR_MODEL || 'nova-2';
 const DG_TTS_VOICE = process.env.DG_TTS_VOICE || 'aura-asteria-en';
 
@@ -39,8 +40,8 @@ type DGStream = ReturnType<typeof dg.listen.live> extends Promise<infer P>
 	: any;
 
 io.on('connection', (socket) => {
-	console.log("✅ WebSocket client connected:", socket.id);
-	
+	console.log('✅ WebSocket client connected:', socket.id);
+
 	let dgLive: DGStream | null = null;
 	let ttsAbort: AbortController | null = null;
 
@@ -57,37 +58,85 @@ io.on('connection', (socket) => {
 	socket.on(
 		'start',
 		async ({ lang = 'en-US', voice }: { lang?: string; voice?: string }) => {
+			console.log(
+				`🎙️  [${socket.id}] START event received - lang: ${lang}, voice: ${voice}`,
+			);
+			// If a previous Deepgram stream exists, finish/close it to avoid leaks
+			if (dgLive) {
+				try {
+					(dgLive as any).finish?.();
+				} catch {}
+				try {
+					(dgLive as any).close?.();
+				} catch {}
+				dgLive = null;
+				console.log(
+					`♻️  [${socket.id}] Closed previous Deepgram stream before starting new one`,
+				);
+			}
 			try {
+				// Configure Deepgram to expect 16kHz linear PCM audio
 				dgLive = await dg.listen.live({
 					model: DG_ASR_MODEL,
 					language: lang,
 					interim_results: true,
 					smart_format: true,
-					encoding: 'opus',
-					sample_rate: 48000,
+					encoding: 'linear16',
+					sample_rate: 16000,
 				});
 
-				dgLive.addListener('open', () => console.log('createClient live open'));
+				dgLive.addListener('open', () => {
+					console.log(`✅ [${socket.id}] Deepgram live connection OPENED`);
+					console.log(
+						`   Model: ${DG_ASR_MODEL}, Language: ${lang}, Encoding: linear16 @ 16kHz`,
+					);
+				});
 
 				dgLive.addListener('transcriptReceived', (msg: any) => {
+					console.log(
+						`📨 [${socket.id}] RAW Deepgram message received:`,
+						JSON.stringify(msg).substring(0, 200),
+					);
 					const alt = msg?.channel?.alternatives?.[0];
 					const text = alt?.transcript || '';
-					if (!text) return;
-					if (msg.is_final) socket.emit('asr_final', { text });
-					else socket.emit('asr_partial', { text });
+					console.log(
+						`📝 [${socket.id}] Extracted text: "${text}" | is_final: ${msg.is_final}`,
+					);
+					if (!text) {
+						console.log(`⚠️  [${socket.id}] Empty transcript, skipping...`);
+						return;
+					}
+					if (msg.is_final) {
+						console.log(`📝 [${socket.id}] ASR FINAL: "${text}"`);
+						socket.emit('asr_final', { text });
+					} else {
+						console.log(`📝 [${socket.id}] ASR PARTIAL: "${text}"`);
+						socket.emit('asr_partial', { text });
+					}
 				});
 
 				dgLive.addListener('error', (e: any) => {
+					console.error(`❌ [${socket.id}] Deepgram ASR error:`, e);
+					console.error(`   Error details:`, JSON.stringify(e, null, 2));
 					socket.emit('error', {
 						code: 'DG_ASR',
 						message: e?.message || String(e),
 					});
 				});
 
-				dgLive.addListener('close', () =>
-					console.log('createClient live closed'),
-				);
+				dgLive.addListener('close', (closeEvent: any) => {
+					console.log(`🔌 [${socket.id}] Deepgram live connection CLOSED`);
+					if (closeEvent) {
+						console.log(
+							`   Close code: ${closeEvent.code}, reason: ${closeEvent.reason}`,
+						);
+					}
+				});
 			} catch (e: any) {
+				console.error(
+					`❌ [${socket.id}] Failed to open Deepgram connection:`,
+					e,
+				);
 				socket.emit('error', {
 					code: 'DG_ASR_OPEN',
 					message: e?.message || String(e),
@@ -96,18 +145,67 @@ io.on('connection', (socket) => {
 		},
 	);
 
+	let audioChunkCount = 0;
+	let firstChunkReceived = false;
 	socket.on('audio_chunk', async (buf: ArrayBuffer) => {
-		if (!dgLive) return;
+		if (!dgLive) {
+			console.warn(
+				`⚠️  [${socket.id}] Received audio_chunk but dgLive is not initialized`,
+			);
+			return;
+		}
 		try {
 			dgLive.send(Buffer.from(buf));
-		} catch {}
+			audioChunkCount++;
+
+			// Log first chunk with details
+			if (!firstChunkReceived) {
+				console.log(
+					`🎵 [${socket.id}] FIRST audio chunk received: ${buf.byteLength} bytes`,
+				);
+				firstChunkReceived = true;
+			}
+
+			// Log every 10th chunk to avoid flooding console
+			if (audioChunkCount % 10 === 0) {
+				console.log(
+					`🎵 [${socket.id}] Sent ${audioChunkCount} audio chunks to Deepgram (latest: ${buf.byteLength} bytes)`,
+				);
+			}
+		} catch (e) {
+			console.error(`❌ [${socket.id}] Error sending audio chunk:`, e);
+		}
 	});
 
 	socket.on('stop_talk', async () => {
-		if (!dgLive) return;
+		console.log(
+			`⏹️  [${socket.id}] STOP_TALK event received (sent ${audioChunkCount} total chunks)`,
+		);
+		const totalChunks = audioChunkCount;
+		audioChunkCount = 0; // Reset counter
+		firstChunkReceived = false; // Reset flag
+
+		if (!dgLive) {
+			console.warn(`⚠️  [${socket.id}] Cannot finish - dgLive is null`);
+			return;
+		}
+
+		if (totalChunks === 0) {
+			console.warn(
+				`⚠️  [${socket.id}] No audio chunks were sent before stop_talk!`,
+			);
+		}
+
 		try {
-			dgLive.flush();
-		} catch {}
+			// Send finish signal to Deepgram to finalize transcription
+			console.log(`📤 [${socket.id}] Calling dgLive.finish()...`);
+			dgLive.finish();
+			console.log(
+				`✅ [${socket.id}] Deepgram stream finished - waiting for final transcript...`,
+			);
+		} catch (e) {
+			console.error(`❌ [${socket.id}] Error finishing Deepgram:`, e);
+		}
 	});
 
 	socket.on('cancel_tts', () => {
@@ -118,14 +216,20 @@ io.on('connection', (socket) => {
 	socket.on(
 		'agent_reply',
 		async ({ text, voice }: { text: string; voice?: string }) => {
-			if (!text || !text.trim()) return;
+			console.log(`🤖 [${socket.id}] AGENT_REPLY event - User said: "${text}"`);
+			if (!text || !text.trim()) {
+				console.warn(`⚠️  [${socket.id}] Empty text received for agent_reply`);
+				return;
+			}
 
 			// 1) Stream Gemini tokens
 			socket.emit('thinking');
+			console.log(`💭 [${socket.id}] Sent 'thinking' event to client`);
 			let buffer = '';
 
 			const flushSentenceToTTS = async (sentence: string) => {
 				if (!sentence.trim()) return;
+				console.log(`🔊 [${socket.id}] Converting to speech: "${sentence}"`);
 				// cancel previous TTS if you want utterance-at-a-time policy
 				stopAnyTTS();
 				ttsAbort = new AbortController();
@@ -143,30 +247,42 @@ io.on('connection', (socket) => {
 					signal: ttsAbort.signal,
 				});
 				if (!res.ok) {
+					console.error(`❌ [${socket.id}] TTS API error: HTTP ${res.status}`);
 					socket.emit('error', {
 						code: 'DG_TTS',
 						message: `HTTP ${res.status}`,
 					});
 					return;
 				}
-				if (!res.body) return;
+				if (!res.body) {
+					console.warn(`⚠️  [${socket.id}] TTS response has no body`);
+					return;
+				}
 
 				// stream chunks to client immediately
+				let chunkCount = 0;
 				for await (const chunk of res.body as any) {
 					socket.emit('tts_chunk', Buffer.from(chunk));
+					chunkCount++;
 				}
+				console.log(
+					`✅ [${socket.id}] TTS complete - sent ${chunkCount} audio chunks`,
+				);
 				socket.emit('tts_done');
 				ttsAbort = null;
 			};
 
 			try {
+				console.log(`🧠 [${socket.id}] Starting Gemini stream...`);
 				for await (const piece of streamGeminiReply(text)) {
 					buffer += piece;
+					console.log(`🧠 [${socket.id}] Gemini chunk: "${piece}"`);
 					// naive sentence splitting; improve with an sbd lib if needed
 					let m: RegExpExecArray | null;
 					const re = /([^.!?\n]+[.!?])(\s|$)/g;
 					while ((m = re.exec(buffer))) {
 						const sentence = m[1];
+						console.log(`💬 [${socket.id}] Sending reply_text: "${sentence}"`);
 						socket.emit('reply_text', { text: sentence }); // optional captions
 						await flushSentenceToTTS(sentence);
 					}
@@ -174,11 +290,19 @@ io.on('connection', (socket) => {
 					buffer = buffer.replace(/([^.!?\n]+[.!?])(\s|$)/g, '');
 				}
 				if (buffer.trim()) {
+					console.log(
+						`💬 [${socket.id}] Sending final reply_text: "${buffer.trim()}"`,
+					);
 					socket.emit('reply_text', { text: buffer.trim() });
 					await flushSentenceToTTS(buffer.trim());
 				}
+				console.log(`✅ [${socket.id}] Agent reply complete`);
 			} catch (e: any) {
-				if (e?.name === 'AbortError') return; // canceled (barge-in)
+				if (e?.name === 'AbortError') {
+					console.log(`⚠️  [${socket.id}] TTS aborted (barge-in)`);
+					return; // canceled (barge-in)
+				}
+				console.error(`❌ [${socket.id}] LLM stream error:`, e);
 				socket.emit('error', {
 					code: 'LLM_STREAM',
 					message: e?.message || String(e),
@@ -188,6 +312,7 @@ io.on('connection', (socket) => {
 	);
 
 	socket.on('disconnect', () => {
+		console.log(`🔌 [${socket.id}] Client disconnected`);
 		try {
 			dgLive?.close();
 		} catch {}

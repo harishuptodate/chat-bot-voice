@@ -1,8 +1,8 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import { getSocket } from '../../lib/socket';
-import { createRecorder } from '../../lib/audio/recorder';
-import { StreamPlayer } from '../../lib/audio/player';
+import { getSocket } from '../lib/socket';
+import { createRecorder } from '../lib/audio/recorder';
+import { StreamPlayer } from '../lib/audio/player';
 
 export default function VoicePage() {
 	const [status, setStatus] = useState<'idle' | 'listening' | 'speaking'>(
@@ -17,41 +17,65 @@ export default function VoicePage() {
 
 	useEffect(() => {
 		const socket = getSocket();
-		console.log('socket: ', socket);
 		socketRef.current = socket;
 
 		socket.on('connect', () => {
-			// socket.emit('start', { lang: 'en-US', voice: 'aura-asteria-en' });
-			console.log('connected');
+			console.log('✅ WebSocket CONNECTED - Socket ID:', socket.id);
+			socket.emit('start', { lang: 'en-US', voice: 'aura-asteria-en' });
+			console.log('🎙️  Sent START event to server');
 		});
 
-		socket.on('asr_partial', ({ text }: { text: string }) => setPartial(text));
+		socket.on('asr_partial', ({ text }: { text: string }) => {
+			console.log('📝 ASR PARTIAL received:', text);
+			setPartial(text);
+		});
+
 		socket.on('asr_final', ({ text }: { text: string }) => {
+			console.log('✅ ASR FINAL received:', text);
 			setFinalText(text);
 			setPartial('');
 			setStatus('speaking');
 			// request LLM -> TTS
+			console.log('🤖 Sending AGENT_REPLY to server with text:', text);
 			socket.emit('agent_reply', { text });
 		});
 
+		socket.on('thinking', () => {
+			console.log('💭 AI is thinking...');
+		});
+
 		socket.on('reply_text', ({ text }: { text: string }) => {
+			console.log('💬 AI REPLY TEXT received:', text);
 			setAssistantCaption(text);
 		});
 
 		socket.on('tts_chunk', (binary: ArrayBuffer) => {
+			console.log('🔊 TTS CHUNK received, size:', binary.byteLength);
 			if (!playerRef.current) {
 				playerRef.current = new StreamPlayer();
 				document.body.appendChild(playerRef.current.element);
+				console.log('🎵 StreamPlayer created and added to DOM');
 			}
 			playerRef.current.append(binary);
 		});
 
 		socket.on('tts_done', () => {
+			console.log('✅ TTS DONE - Audio playback complete');
 			setStatus('idle');
 			setAssistantCaption('');
 		});
 
-		socket.on('error', (e: any) => console.error('Server error', e));
+		socket.on('error', (e: any) => {
+			console.error('❌ Server error:', e);
+		});
+
+		socket.on('connect_error', (error: any) => {
+			console.error('❌ Connection error:', error);
+		});
+
+		socket.on('disconnect', (reason: string) => {
+			console.warn('⚠️  Disconnected:', reason);
+		});
 
 		// Manually connect to the socket
 		if (!socket.connected) {
@@ -61,24 +85,36 @@ export default function VoicePage() {
 
 		return () => {
 			// socket.disconnect();
-			console.log('disconnected');
+			console.log('🧹 Cleaning up socket listeners');
 		};
 	}, []);
 
 	const startPTT = async () => {
+		console.log('🎤 Push-to-talk STARTED');
 		if (status === 'speaking') {
 			// barge-in
+			console.log('⚠️  Barge-in: Canceling current TTS');
 			socketRef.current?.emit('cancel_tts');
 		}
+		let chunkCount = 0;
 		const rec = await createRecorder((buf: ArrayBuffer) => {
+			chunkCount++;
+			// Log every 10th chunk to avoid flooding console
+			if (chunkCount % 10 === 0) {
+				console.log(
+					`🎵 Sent ${chunkCount} audio chunks to server (latest: ${buf.byteLength} bytes)`,
+				);
+			}
 			socketRef.current?.emit('audio_chunk', buf);
 		});
 		recRef.current = rec;
 		rec.start(200); // every 200ms
 		setStatus('listening');
+		console.log('👂 Now LISTENING - Recording started');
 	};
 
 	const stopPTT = () => {
+		console.log('⏹️  Push-to-talk STOPPED');
 		try {
 			if (recRef.current) {
 				recRef.current.stop();
@@ -87,9 +123,11 @@ export default function VoicePage() {
 					| undefined;
 				stream?.getTracks()?.forEach((t) => t.stop());
 				recRef.current = null;
+				console.log('✅ Recording stopped and stream closed');
 			}
 		} finally {
 			setStatus('idle');
+			console.log('📤 Sending STOP_TALK to server');
 			socketRef.current?.emit('stop_talk');
 		}
 	};
@@ -123,6 +161,36 @@ export default function VoicePage() {
 					{status}
 				</span>
 			</div>
+
+			{/* Debug Display - Shows what user said */}
+			{(partial || finalText) && (
+				<div className="mt-4 rounded-lg border border-blue-500/30 bg-blue-500/10 p-3">
+					<div className="text-xs font-semibold text-blue-300 mb-1">
+						YOU SAID:
+					</div>
+					<div className="text-sm text-white">
+						{partial ? (
+							<span className="text-blue-200 italic">
+								{partial} (partial...)
+							</span>
+						) : (
+							<span className="text-white font-semibold">{finalText}</span>
+						)}
+					</div>
+				</div>
+			)}
+
+			{/* Debug Display - Shows AI response */}
+			{assistantCaption && (
+				<div className="mt-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3">
+					<div className="text-xs font-semibold text-emerald-300 mb-1">
+						AI SAYS:
+					</div>
+					<div className="text-sm text-white font-semibold">
+						{assistantCaption}
+					</div>
+				</div>
+			)}
 
 			<div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
 				<div className="relative flex min-h-[220px] flex-col items-center justify-center overflow-hidden rounded-2xl border border-white/10 bg-slate-900/60 p-6">
