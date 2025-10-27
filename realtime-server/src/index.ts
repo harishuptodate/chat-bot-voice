@@ -68,6 +68,7 @@ io.on('connection', (socket) => {
 			headers: {
 				Authorization: `Token ${DG_KEY}`,
 				'Content-Type': 'application/json',
+				Accept: 'audio/mpeg',
 			},
 			body: JSON.stringify({ text: sentence }),
 			signal: ttsAbort.signal,
@@ -250,6 +251,7 @@ io.on('connection', (socket) => {
 	});
 
 	socket.on('cancel_tts', () => {
+		// Allow barge-in with a slightly larger debounce window so it cuts promptly
 		stopAnyTTS();
 	});
 
@@ -278,12 +280,13 @@ io.on('connection', (socket) => {
 
 				const url = `https://api.deepgram.com/v1/speak?model=${encodeURIComponent(
 					voice || DG_TTS_VOICE,
-				)}`;
+				)}&format=webm`;
 				const res = await fetch(url, {
 					method: 'POST',
 					headers: {
 						Authorization: `Token ${DG_KEY}`,
 						'Content-Type': 'application/json',
+						Accept: 'audio/webm',
 					},
 					body: JSON.stringify({ text: sentence }),
 					signal: ttsAbort.signal,

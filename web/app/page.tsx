@@ -59,6 +59,10 @@ export default function VoicePage() {
 		});
 
 		socket.on('tts_done', () => {
+			// End the stream so MediaSource can flush
+			try {
+				playerRef.current?.end();
+			} catch {}
 			console.log('✅ TTS DONE - Audio playback complete');
 			setStatus('idle');
 			setAssistantCaption('');
