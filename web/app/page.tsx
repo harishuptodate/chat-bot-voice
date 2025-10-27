@@ -21,8 +21,7 @@ export default function VoicePage() {
 
 		socket.on('connect', () => {
 			console.log('✅ WebSocket CONNECTED - Socket ID:', socket.id);
-			socket.emit('start', { lang: 'en-US', voice: 'aura-asteria-en' });
-			console.log('🎙️  Sent START event to server');
+			// Start ASR only when user presses Push-to-talk to avoid duplicate sessions
 		});
 
 		socket.on('asr_partial', ({ text }: { text: string }) => {
@@ -96,6 +95,12 @@ export default function VoicePage() {
 			console.log('⚠️  Barge-in: Canceling current TTS');
 			socketRef.current?.emit('cancel_tts');
 		}
+		// Tell server to start ASR session now
+		socketRef.current?.emit('start', {
+			lang: 'en-US',
+			voice: 'aura-asteria-en',
+		});
+		console.log('🎙️  Sent START event to server');
 		let chunkCount = 0;
 		const rec = await createRecorder((buf: ArrayBuffer) => {
 			chunkCount++;
@@ -108,7 +113,7 @@ export default function VoicePage() {
 			socketRef.current?.emit('audio_chunk', buf);
 		});
 		recRef.current = rec;
-		rec.start(200); // every 200ms
+		rec.start(200); // send ~200ms chunks (suitable for 16k PCM)
 		setStatus('listening');
 		console.log('👂 Now LISTENING - Recording started');
 	};

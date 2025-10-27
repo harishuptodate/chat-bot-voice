@@ -3,7 +3,7 @@ import express from 'express';
 import http from 'http';
 import cors from 'cors';
 import { Server } from 'socket.io';
-import { createClient } from '@deepgram/sdk';
+import { LiveTranscriptionEvents, createClient } from '@deepgram/sdk';
 import fetch from 'node-fetch';
 import { geminiModel, streamGeminiReply } from './gemini.js';
 
@@ -13,7 +13,6 @@ const CORS_ORIGINS = (process.env.CORS_ORIGINS || 'http://localhost:3000')
 	.map((s) => s.trim());
 
 const DG_KEY = process.env.DEEPGRAM_API_KEY!;
-console.log('DG_KEY:', DG_KEY);
 const DG_ASR_MODEL = process.env.DG_ASR_MODEL || 'nova-2';
 const DG_TTS_VOICE = process.env.DG_TTS_VOICE || 'aura-asteria-en';
 
@@ -44,6 +43,8 @@ io.on('connection', (socket) => {
 
 	let dgLive: DGStream | null = null;
 	let ttsAbort: AbortController | null = null;
+	let ttsQueue: string[] = [];
+	let ttsPlaying = false;
 
 	const stopAnyTTS = () => {
 		if (ttsAbort) {
@@ -52,8 +53,47 @@ io.on('connection', (socket) => {
 			} catch {}
 			ttsAbort = null;
 		}
+		ttsQueue = [];
+		ttsPlaying = false;
 		socket.emit('tts_done');
 	};
+
+	async function speakSentence(sentence: string, voice?: string) {
+		ttsAbort = new AbortController();
+		const url = `https://api.deepgram.com/v1/speak?model=${encodeURIComponent(
+			voice || DG_TTS_VOICE,
+		)}`;
+		const res = await fetch(url, {
+			method: 'POST',
+			headers: {
+				Authorization: `Token ${DG_KEY}`,
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({ text: sentence }),
+			signal: ttsAbort.signal,
+		});
+		if (!res.ok || !res.body) return;
+		for await (const chunk of res.body as any) {
+			socket.emit('tts_chunk', Buffer.from(chunk));
+		}
+	}
+
+	async function processTTSQueue(voice?: string) {
+		if (ttsPlaying) return;
+		ttsPlaying = true;
+		try {
+			while (ttsQueue.length > 0) {
+				const s = ttsQueue.shift();
+				if (!s) continue;
+				await speakSentence(s, voice);
+				await new Promise((r) => setTimeout(r, 50));
+			}
+		} finally {
+			ttsAbort = null;
+			ttsPlaying = false;
+			socket.emit('tts_done');
+		}
+	}
 
 	socket.on(
 		'start',
@@ -75,24 +115,25 @@ io.on('connection', (socket) => {
 				);
 			}
 			try {
-				// Configure Deepgram to expect 16kHz linear PCM audio
-				dgLive = await dg.listen.live({
+				// Configure Deepgram to expect 16kHz linear PCM mono audio
+				dgLive = dg.listen.live({
 					model: DG_ASR_MODEL,
 					language: lang,
 					interim_results: true,
 					smart_format: true,
 					encoding: 'linear16',
 					sample_rate: 16000,
+					channels: 1,
 				});
 
-				dgLive.addListener('open', () => {
+				dgLive.on(LiveTranscriptionEvents.Open, () => {
 					console.log(`✅ [${socket.id}] Deepgram live connection OPENED`);
 					console.log(
-						`   Model: ${DG_ASR_MODEL}, Language: ${lang}, Encoding: linear16 @ 16kHz`,
+						`   Model: ${DG_ASR_MODEL}, Language: ${lang}, Encoding: linear16 @ 16kHz (mono)`,
 					);
 				});
 
-				dgLive.addListener('transcriptReceived', (msg: any) => {
+				dgLive.on(LiveTranscriptionEvents.Transcript, (msg: any) => {
 					console.log(
 						`📨 [${socket.id}] RAW Deepgram message received:`,
 						JSON.stringify(msg).substring(0, 200),
@@ -198,8 +239,8 @@ io.on('connection', (socket) => {
 
 		try {
 			// Send finish signal to Deepgram to finalize transcription
-			console.log(`📤 [${socket.id}] Calling dgLive.finish()...`);
-			dgLive.finish();
+			console.log(`📤 [${socket.id}] Calling dgLive.finalize()...`);
+			await dgLive.finalize?.();
 			console.log(
 				`✅ [${socket.id}] Deepgram stream finished - waiting for final transcript...`,
 			);
@@ -226,6 +267,7 @@ io.on('connection', (socket) => {
 			socket.emit('thinking');
 			console.log(`💭 [${socket.id}] Sent 'thinking' event to client`);
 			let buffer = '';
+			let spoken = '';
 
 			const flushSentenceToTTS = async (sentence: string) => {
 				if (!sentence.trim()) return;
@@ -284,17 +326,21 @@ io.on('connection', (socket) => {
 						const sentence = m[1];
 						console.log(`💬 [${socket.id}] Sending reply_text: "${sentence}"`);
 						socket.emit('reply_text', { text: sentence }); // optional captions
-						await flushSentenceToTTS(sentence);
+						spoken += sentence + ' ';
 					}
 					// keep only trailing fragment
 					buffer = buffer.replace(/([^.!?\n]+[.!?])(\s|$)/g, '');
 				}
 				if (buffer.trim()) {
-					console.log(
-						`💬 [${socket.id}] Sending final reply_text: "${buffer.trim()}"`,
-					);
-					socket.emit('reply_text', { text: buffer.trim() });
-					await flushSentenceToTTS(buffer.trim());
+					const tail = buffer.trim();
+					console.log(`💬 [${socket.id}] Sending final reply_text: "${tail}"`);
+					socket.emit('reply_text', { text: tail });
+					spoken += tail;
+				}
+				// Speak only once: the full composed sentence(s)
+				const toSpeak = spoken.trim();
+				if (toSpeak) {
+					await flushSentenceToTTS(toSpeak);
 				}
 				console.log(`✅ [${socket.id}] Agent reply complete`);
 			} catch (e: any) {
